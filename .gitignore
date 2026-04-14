@@ -1,0 +1,16 @@
+# Fidelity session cookies
+Fidelity_*.json
+
+# Option holdings state
+fidelity_scripts/current_option_holdings.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+
+# OS
+.DS_Store
