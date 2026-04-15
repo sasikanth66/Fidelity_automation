@@ -357,13 +357,11 @@ def main():
         os.unlink(SOCKET_PATH)
 
     headless = True
-    for cfg_name in ["buy_call_config.json", "buy_put_config.json"]:
-        try:
-            cfg = load_config(cfg_name)
-            headless = cfg.get("headless", True)
-            break
-        except:
-            pass
+    try:
+        cfg = load_config("server_config.json")
+        headless = cfg.get("headless", True)
+    except:
+        pass
 
     print("Starting Fidelity browser...")
     fidelity = FidelityAutomation(headless=headless, title="my_session", save_state=True, profile_path=PROFILE_PATH)
