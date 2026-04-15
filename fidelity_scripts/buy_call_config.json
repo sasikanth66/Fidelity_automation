@@ -2,8 +2,8 @@
   "account": "Z09522470",
   "ticker": "SPY",
   "quantity": 1,
-  "expiration_days": 3,
+  "expiration_days": 1,
   "strike_mode": "nearest_otm",
   "limit_price": "ask",
-  "headless": false
+  "headless": true
 }
