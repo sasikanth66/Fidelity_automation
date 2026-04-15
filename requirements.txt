@@ -5,3 +5,4 @@ yfinance>=0.2.0,<0.2.59
 fidelity-api>=0.0.16
 playwright>=1.40.0
 pyotp>=2.9.0
+flask>=3.0.0

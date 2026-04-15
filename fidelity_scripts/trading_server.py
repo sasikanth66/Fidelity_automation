@@ -5,9 +5,11 @@ Start once, send commands via Unix socket.
 """
 import json
 import os
+import queue
 import signal
 import socket
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -20,6 +22,10 @@ SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 HOLDINGS_PATH = os.path.join(SCRIPTS_DIR, "current_option_holdings.json")
 
 fidelity = None
+command_queue = queue.Queue()
+result_map = {}
+result_lock = threading.Lock()
+result_events = {}
 
 
 def load_config(name):
@@ -202,6 +208,33 @@ def handle_summary():
     return {"holdings": {t: dict(info) for t, info in summary.items()}}
 
 
+def handle_status():
+    """Show option holdings from Fidelity with current P/L."""
+    # Get fresh positions from Fidelity
+    fidelity.getAccountInfo()
+
+    options = []
+    for acct_num, info in fidelity.account_dict.items():
+        if not info.get("stocks"):
+            continue
+        for stock in info["stocks"]:
+            ticker = stock.get("ticker", "")
+            # Options have symbols starting with - like -SPY260417C687
+            if ticker.startswith("-"):
+                options.append({
+                    "account": acct_num,
+                    "symbol": ticker,
+                    "quantity": stock.get("quantity", 0),
+                    "last_price": stock.get("last_price", 0),
+                    "value": stock.get("value", 0),
+                })
+
+    # Also show local holdings tracker
+    local = load_holdings()
+
+    return {"options_from_fidelity": options, "local_holdings": local}
+
+
 def handle_command(data):
     try:
         cmd = json.loads(data)
@@ -222,7 +255,7 @@ def handle_command(data):
         elif action == "sell_put":
             result = handle_sell("put", dry=dry, index=index)
         elif action == "status":
-            result = load_holdings()
+            result = handle_status()
         elif action == "accounts":
             result = handle_accounts()
         elif action == "holdings":
@@ -282,6 +315,23 @@ def print_result(result):
     elif "holdings" in result and "calls" not in result:
         for ticker, info in result["holdings"].items():
             print(f"  {ticker}: {info['quantity']} shares @ ${info['last_price']:.2f} = ${info['value']:.2f}")
+    if "options_from_fidelity" in result:
+        opts = result["options_from_fidelity"]
+        local = result.get("local_holdings", {})
+        if opts:
+            print("  Option Positions (from Fidelity):")
+            for o in opts:
+                print(f"    {o['account']}  {o['symbol']}  {o['quantity']} contracts  @ ${o['last_price']:.2f}  = ${o['value']:.2f}")
+        else:
+            print("  No option positions found on Fidelity.")
+        print()
+        calls = local.get("calls", [])
+        puts = local.get("puts", [])
+        print(f"  Local Tracker: {len(calls)} call(s), {len(puts)} put(s)")
+        for i, c in enumerate(calls):
+            print(f"    [{i}] {c['quantity']}x {c['ticker']} {c['expiration']} ${c['strike']} call")
+        for i, p in enumerate(puts):
+            print(f"    [{i}] {p['quantity']}x {p['ticker']} {p['expiration']} ${p['strike']} put")
     elif "calls" in result and "puts" in result:
         print(f"  Calls: {len(result['calls'])} position(s)")
         for i, c in enumerate(result['calls']):
@@ -293,6 +343,18 @@ def print_result(result):
         print(f"Error: {result['error']}")
 
 
+ALIASES = {
+    "bc": ("buy_call", False),
+    "bcd": ("buy_call", True),
+    "bp": ("buy_put", False),
+    "bpd": ("buy_put", True),
+    "sc": ("sell_call", False),
+    "scd": ("sell_call", True),
+    "sp": ("sell_put", False),
+    "spd": ("sell_put", True),
+}
+
+
 def parse_stdin_command(line):
     """Parse a simple stdin command into a JSON command dict."""
     parts = line.strip().split()
@@ -300,18 +362,67 @@ def parse_stdin_command(line):
         return None
 
     action = parts[0].lower()
-    cmd = {"action": action, "dry": True}
 
+    # Check aliases
+    if action in ALIASES:
+        real_action, dry = ALIASES[action]
+        cmd = {"action": real_action, "dry": dry}
+    else:
+        cmd = {"action": action, "dry": True}
+        for i, p in enumerate(parts[1:]):
+            if p == "--confirm":
+                cmd["dry"] = False
+
+    # Parse --index for any command
     for i, p in enumerate(parts[1:]):
-        if p == "--confirm":
-            cmd["dry"] = False
-        elif p == "--index" and i + 1 < len(parts[1:]):
+        if p == "--index" and i + 1 < len(parts[1:]):
             try:
                 cmd["index"] = int(parts[i + 2])
             except (ValueError, IndexError):
                 pass
 
     return cmd
+
+
+HELP_TEXT = """----------------------------------------
+Commands:
+  bc / bcd              Buy call (live / dry run)
+  bp / bpd              Buy put (live / dry run)
+  sc / scd              Sell calls (live / dry run)
+  sp / spd              Sell puts (live / dry run)
+  status                Show option holdings
+  accounts              Show account balances
+  holdings              Show stock positions
+  summary               Aggregated holdings
+  quit                  Stop server
+----------------------------------------"""
+
+
+def handle_command_threadsafe(data):
+    """Queue a command and wait for the main thread to process it."""
+    request_id = id(threading.current_thread()) + id(data)
+    event = threading.Event()
+    with result_lock:
+        result_events[request_id] = event
+    command_queue.put((request_id, data))
+    event.wait(timeout=120)
+    with result_lock:
+        result = result_map.pop(request_id, json.dumps({"error": "Timeout"}))
+        result_events.pop(request_id, None)
+    return result
+
+
+def process_queue():
+    """Process one pending command from the queue (called from main thread)."""
+    try:
+        request_id, data = command_queue.get_nowait()
+        response = handle_command(data)
+        with result_lock:
+            result_map[request_id] = response
+            if request_id in result_events:
+                result_events[request_id].set()
+    except queue.Empty:
+        pass
 
 
 def cleanup(signum=None, frame=None):
@@ -336,7 +447,7 @@ def socket_listener(sock):
             if not data:
                 conn.close()
                 continue
-            response = handle_command(data)
+            response = handle_command_threadsafe(data)
             if response == "QUIT":
                 conn.sendall(json.dumps({"message": "Server shutting down"}).encode("utf-8"))
                 conn.close()
@@ -388,38 +499,57 @@ def main():
         print("Session valid. Logged in.")
 
     # Start socket listener in background thread for client scripts
-    import threading
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(SOCKET_PATH)
     sock.listen(1)
     thread = threading.Thread(target=socket_listener, args=(sock,), daemon=True)
     thread.start()
 
-    print(f"\nTrading server ready. Socket: {SOCKET_PATH}")
-    print("Commands: buy_call, buy_put, sell_call, sell_put, status, accounts, holdings, summary, quit")
-    print("Add --confirm to execute for real (default is dry run)\n")
+    # Start web UI in background thread (uses threadsafe wrapper)
+    from web_ui import start_web_ui
+    web_port = 5555
+    web_thread = threading.Thread(target=start_web_ui, args=(handle_command_threadsafe, web_port), daemon=True)
+    web_thread.start()
 
-    # REPL loop
+    # Auto-open in browser
+    import webbrowser
+    webbrowser.open(f"http://localhost:{web_port}")
+
+    print(f"\nTrading server ready.")
+    print(f"  Socket: {SOCKET_PATH}")
+    print(f"  Web UI: http://localhost:{web_port}")
+    print(HELP_TEXT)
+
+    # REPL loop — also processes queued commands from web/socket
+    import select
     while True:
+        # Process any pending web/socket commands
+        process_queue()
+
+        # Check if stdin has input (non-blocking)
         try:
-            line = input("> ")
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                cmd = parse_stdin_command(line)
+                if not cmd:
+                    continue
+                if cmd["action"] == "quit":
+                    break
+                response = handle_command(json.dumps(cmd))
+                try:
+                    result = json.loads(response)
+                except:
+                    result = {"error": response}
+                print_result(result)
+                print(HELP_TEXT)
+                print("> ", end="", flush=True)
         except (EOFError, KeyboardInterrupt):
             break
-
-        cmd = parse_stdin_command(line)
-        if not cmd:
-            continue
-
-        if cmd["action"] == "quit":
-            break
-
-        response = handle_command(json.dumps(cmd))
-        try:
-            result = json.loads(response)
-        except:
-            result = {"error": response}
-        print_result(result)
-        print()
 
     cleanup()
 
