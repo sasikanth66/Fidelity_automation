@@ -94,6 +94,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let startServer = NSMenuItem(title: "Start Server", action: #selector(startServer), keyEquivalent: "")
         startServer.target = self
         menu.addItem(startServer)
+
+        let stopServer = NSMenuItem(title: "Stop Server", action: #selector(stopServer), keyEquivalent: "")
+        stopServer.target = self
+        menu.addItem(stopServer)
         menu.addItem(NSMenuItem.separator())
 
         let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
@@ -129,6 +133,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         notifyProc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         notifyProc.arguments = ["-e", notify]
         try? notifyProc.run()
+    }
+
+    @objc func stopServer() {
+        sendCommand(action: "quit", dry: true) { result in
+            let script = "display notification \"Trading server stopped.\" with title \"Fidelity Trade\" sound name \"default\""
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", script]
+            try? proc.run()
+        }
     }
 
     @objc func quitApp() {
