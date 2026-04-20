@@ -91,6 +91,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeItem("Status", tradeAction: "status", dry: true))
         menu.addItem(NSMenuItem.separator())
 
+        let startServer = NSMenuItem(title: "Start Server", action: #selector(startServer), keyEquivalent: "")
+        startServer.target = self
+        menu.addItem(startServer)
+        menu.addItem(NSMenuItem.separator())
+
         let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -104,6 +109,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         item.target = self
         item.representedObject = ["action": tradeAction, "dry": dry] as [String: Any]
         return item
+    }
+
+    @objc func startServer() {
+        let scriptDir = "/Users/sasi/stock_sr_scanner/fidelity_scripts"
+        let appleScript = """
+        tell application "Terminal"
+            activate
+            do script "cd \(scriptDir) && python trading_server.py"
+        end tell
+        """
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", appleScript]
+        try? proc.run()
+
+        let notify = "display notification \"Trading server starting...\" with title \"Fidelity Trade\" sound name \"default\""
+        let notifyProc = Process()
+        notifyProc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        notifyProc.arguments = ["-e", notify]
+        try? notifyProc.run()
     }
 
     @objc func quitApp() {
